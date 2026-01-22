@@ -15,6 +15,9 @@ class BaseHeadSplit(nn.Module):
         
     def forward(self, x):
         out = self.base(x)
+        # Flatten if output is more than 2D (e.g., for conv features)
+        if out.dim() > 2:
+            out = out.flatten(1)
         out = self.head(out)
 
         return out

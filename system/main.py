@@ -157,50 +157,19 @@ def run(args):
             # timm accepts the model name (without 'timm/') for create_model
             model_name = 'tiny_vit_5m_224.dist_in22k'
             # Create model without forcing classifier; we'll reset appropriately
-            args.model = timm.create_model(model_name, pretrained=True)
+            model = timm.create_model(model_name, pretrained=True)
 
-            # Try to reset classifier properly (timm models provide reset_classifier)
-            try:
-                if hasattr(args.model, 'reset_classifier'):
-                    args.model.reset_classifier(args.num_classes)
-                else:
-                    raise AttributeError
-            except Exception:
-                # Fallback: try to infer feature dim and set a Linear head
-                nf = getattr(args.model, 'num_features', None)
-                if nf is None:
-                    # try to inspect existing head
-                    for attr in ('head', 'fc', 'classifier'):
-                        if hasattr(args.model, attr):
-                            mod = getattr(args.model, attr)
-                            # try to get in_features from a linear layer
-                            if hasattr(mod, 'in_features'):
-                                nf = mod.in_features
-                                break
-                            # try common submodules
-                            if hasattr(mod, 'weight') and getattr(mod, 'weight').ndim == 2:
-                                nf = mod.weight.shape[1]
-                                break
+            # Get feature dimension from forward_features
+            with torch.no_grad():
+                dummy_input = torch.randn(1, 3, 224, 224)
+                features = model.forward_features(dummy_input)
+                nf = features.numel() // features.shape[0]  # total features per sample
 
-                if nf is None:
-                    raise RuntimeError('Unable to determine feature dimension for TinyViT classifier. Update the code to match model API.')
+            # Always use a simple linear classifier for better performance
+            model.head = nn.Identity()  # Make base return features
+            model.fc = nn.Linear(nf, args.num_classes)
 
-                # attach a simple linear head compatible with BaseHeadSplit
-                args.model.fc = nn.Linear(nf, args.num_classes)
-
-            # If the timm model exposes a conv-style `head` (common), detach it so base returns feature maps
-            if hasattr(args.model, 'head'):
-                # preserve original conv-style head as fc for downstream code
-                orig_head = args.model.head
-                args.model.head = nn.Identity()
-                args.model.fc = orig_head
-            else:
-                # ensure `.fc` attribute exists for downstream code (copying head)
-                if not hasattr(args.model, 'fc'):
-                    if hasattr(args.model, 'classifier'):
-                        args.model.fc = args.model.classifier
-
-            args.model = args.model.to(args.device)
+            args.model = model.to(args.device)
             
         elif model_str == "LSTM":
             args.model = LSTMNet(hidden_dim=args.feature_dim, vocab_size=args.vocab_size, num_classes=args.num_classes).to(args.device)
@@ -592,10 +561,20 @@ if __name__ == "__main__":
             with open(config_path, 'r') as f:
                 config = json.load(f)
                 args.num_classes = config.get('num_classes', 10)
-                print(f"Auto-detected num_classes={args.num_classes} from {args.dataset} config.")
+                args.num_clients = config.get('num_clients', args.num_clients)
+                print(f"Auto-detected num_classes={args.num_classes}, num_clients={args.num_clients} from {args.dataset} config.")
         else:
             args.num_classes = 10
             print(f"Config not found; using default num_classes=10.")
+    else:
+        # Auto-detect num_clients from config even if num_classes is specified
+        import json
+        config_path = os.path.join('../dataset', args.dataset, 'config.json')
+        if os.path.exists(config_path):
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+                args.num_clients = config.get('num_clients', args.num_clients)
+                print(f"Auto-detected num_clients={args.num_clients} from {args.dataset} config.")
 
     if args.device == "cuda" and not torch.cuda.is_available():
         print("\ncuda is not avaiable.\n")
