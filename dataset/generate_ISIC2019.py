@@ -9,8 +9,8 @@ import pandas as pd
 import numpy as np
 from PIL import Image
 from collections import defaultdict
+import albumentations
 from utils.dataset_utils import separate_data, split_data, save_file, check
-
 
 # Configuration
 dataset_name = 'ISIC2019'
@@ -77,9 +77,8 @@ def load_and_preprocess_data():
         
         try:
             img = Image.open(image_path).convert('RGB')
-            # Normalize size so arrays per client are homogeneous (models expect fixed input size)
-            target_size = (224, 224)
-            img = img.resize(target_size, Image.BICUBIC)
+            # Keep original dimensions (224px height, varying width)
+            # Crops will be applied on-the-fly by ISIC2019Dataset
             img_array = np.array(img, dtype=np.uint8)
         except Exception as e:
             print(f"Warning: Failed to load image {image_id}: {e}")
@@ -158,7 +157,7 @@ def organize_by_source(images_dict, labels_dict, source_dict):
         client_images[client_id].append(img_array)
         client_labels[client_id].append(label)
     
-    # Convert to numpy arrays
+    # Convert to lists (keep as list for varying image dimensions)
     X = []
     y = []
     statistic = []
@@ -166,7 +165,11 @@ def organize_by_source(images_dict, labels_dict, source_dict):
     for client_id in range(num_clients):
         imgs = client_images.get(client_id, [])
         labs = client_labels.get(client_id, [])
-        X.append(np.array(imgs))
+        # Create object array properly for varying image sizes
+        img_array = np.empty(len(imgs), dtype=object)
+        for i, img in enumerate(imgs):
+            img_array[i] = img
+        X.append(img_array)
         y.append(np.array(labs))
 
         if len(labs) == 0:
@@ -211,6 +214,9 @@ def generate_ISIC2019():
     # Split into train/test
     print("\nSplitting data into train/test...")
     train_data, test_data = split_data(X, y)
+    
+    # Note: Crops (RandomCrop for train, CenterCrop for test) are applied
+    # on-the-fly by ISIC2019Dataset to preserve original dimensions
     
     # Save to disk
     print("Saving dataset to disk...")
