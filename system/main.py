@@ -478,6 +478,17 @@ if __name__ == "__main__":
                         help="Set this for text tasks. 80 for Shakespeare. 32000 for AG_News and SogouNews.")
     parser.add_argument('-ml', "--max_len", type=int, default=200)
     parser.add_argument('-fs', "--few_shot", type=int, default=0)
+    # imbalance handling
+    parser.add_argument('-cwl', "--class_weighted_loss", type=bool, default=False,
+                        help="Use class-weighted CrossEntropyLoss per client")
+    parser.add_argument('-fl', "--focal_loss", type=bool, default=False,
+                        help="Use FocalLoss instead of CrossEntropyLoss")
+    parser.add_argument('-fg', "--focal_gamma", type=float, default=2.0,
+                        help="Gamma for FocalLoss")
+    parser.add_argument('-lsm', "--label_smoothing", type=float, default=0.0,
+                        help="Label smoothing for CrossEntropyLoss (0-0.2 typical)")
+    parser.add_argument('-os', "--oversample", type=bool, default=False,
+                        help="Use WeightedRandomSampler to balance classes per client")
     # practical
     parser.add_argument('-cdr', "--client_drop_rate", type=float, default=0.0,
                         help="Rate for clients that train but drop out")

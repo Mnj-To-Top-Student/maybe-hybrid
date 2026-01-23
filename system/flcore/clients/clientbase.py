@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 import os
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler, Subset
 from sklearn.preprocessing import label_binarize
 from sklearn import metrics
 from utils.data_utils import read_client_data
@@ -43,7 +43,43 @@ class Client(object):
         self.train_time_cost = {'num_rounds': 0, 'total_cost': 0.0}
         self.send_time_cost = {'num_rounds': 0, 'total_cost': 0.0}
 
-        self.loss = nn.CrossEntropyLoss()
+        # Imbalance handling options
+        self.use_class_weight = getattr(args, 'class_weighted_loss', False)
+        self.use_focal_loss = getattr(args, 'focal_loss', False)
+        self.focal_gamma = getattr(args, 'focal_gamma', 2.0)
+        self.label_smoothing = getattr(args, 'label_smoothing', 0.0)
+        self.use_oversample = getattr(args, 'oversample', False)
+
+        # Compute per-class weights from this client's labels if requested
+        class_weights_tensor = None
+        if self.use_class_weight or self.use_focal_loss:
+            try:
+                train_data_for_stats = read_client_data(self.dataset, self.id, is_train=True, few_shot=self.few_shot)
+                labels_array = None
+                if hasattr(train_data_for_stats, 'labels'):
+                    labels_array = np.array(train_data_for_stats.labels)
+                elif isinstance(train_data_for_stats, Subset) and hasattr(train_data_for_stats.dataset, 'labels'):
+                    base_labels = np.array(train_data_for_stats.dataset.labels)
+                    labels_array = base_labels[np.array(train_data_for_stats.indices)]
+
+                if labels_array is not None and labels_array.size > 0:
+                    counts = np.bincount(labels_array, minlength=self.num_classes)
+                    counts = np.where(counts == 0, 1, counts)
+                    weights = (labels_array.size) / (self.num_classes * counts)
+                    class_weights_tensor = torch.tensor(weights, dtype=torch.float32, device=self.device)
+            except Exception:
+                class_weights_tensor = None
+
+        if self.use_focal_loss:
+            self.loss = FocalLoss(alpha=class_weights_tensor, gamma=self.focal_gamma)
+        else:
+            if self.label_smoothing and self.label_smoothing > 0.0:
+                try:
+                    self.loss = nn.CrossEntropyLoss(weight=class_weights_tensor, label_smoothing=self.label_smoothing)
+                except TypeError:
+                    self.loss = nn.CrossEntropyLoss(weight=class_weights_tensor)
+            else:
+                self.loss = nn.CrossEntropyLoss(weight=class_weights_tensor)
         # Only include parameters that require gradients (useful when backbone is frozen)
         trainable_params = filter(lambda p: p.requires_grad, self.model.parameters())
         self.optimizer = torch.optim.SGD(trainable_params, lr=self.learning_rate)
@@ -58,14 +94,32 @@ class Client(object):
         if batch_size == None:
             batch_size = self.batch_size
         train_data = read_client_data(self.dataset, self.id, is_train=True, few_shot=self.few_shot)
+
+        if self.use_oversample:
+            labels_array = None
+            if hasattr(train_data, 'labels'):
+                labels_array = np.array(train_data.labels)
+            elif isinstance(train_data, Subset) and hasattr(train_data.dataset, 'labels'):
+                base_labels = np.array(train_data.dataset.labels)
+                labels_array = base_labels[np.array(train_data.indices)]
+
+            if labels_array is not None and labels_array.size > 0:
+                class_count = np.bincount(labels_array, minlength=self.num_classes)
+                class_count = np.where(class_count == 0, 1, class_count)
+                class_weights = (labels_array.size) / (self.num_classes * class_count)
+                sample_weights = class_weights[labels_array]
+                sampler = WeightedRandomSampler(torch.tensor(sample_weights, dtype=torch.double),
+                                                len(sample_weights), replacement=True)
+                return DataLoader(train_data, batch_size, drop_last=True, sampler=sampler)
+
         return DataLoader(train_data, batch_size, drop_last=True, shuffle=True)
 
     def load_test_data(self, batch_size=None):
         if batch_size == None:
             batch_size = self.batch_size
         test_data = read_client_data(self.dataset, self.id, is_train=False, few_shot=self.few_shot)
-        return DataLoader(test_data, batch_size, drop_last=False, shuffle=True)
-        
+        return DataLoader(test_data, batch_size, drop_last=False, shuffle=False)
+
     def set_parameters(self, model):
         for new_param, old_param in zip(model.parameters(), self.model.parameters()):
             old_param.data = new_param.data.clone()
@@ -81,8 +135,6 @@ class Client(object):
 
     def test_metrics(self):
         testloaderfull = self.load_test_data()
-        # self.model = self.load_model('model')
-        # self.model.to(self.device)
         self.model.eval()
 
         test_acc = 0
@@ -111,9 +163,6 @@ class Client(object):
                     lb = lb[:, :2]
                 y_true.append(lb)
 
-        # self.model.cpu()
-        # self.save_model(self.model, 'model')
-
         y_prob = np.concatenate(y_prob, axis=0)
         y_true = np.concatenate(y_true, axis=0)
 
@@ -123,8 +172,6 @@ class Client(object):
 
     def train_metrics(self):
         trainloader = self.load_train_data()
-        # self.model = self.load_model('model')
-        # self.model.to(self.device)
         self.model.eval()
 
         train_num = 0
@@ -141,27 +188,7 @@ class Client(object):
                 train_num += y.shape[0]
                 losses += loss.item() * y.shape[0]
 
-        # self.model.cpu()
-        # self.save_model(self.model, 'model')
-
         return losses, train_num
-
-    # def get_next_train_batch(self):
-    #     try:
-    #         # Samples a new batch for persionalizing
-    #         (x, y) = next(self.iter_trainloader)
-    #     except StopIteration:
-    #         # restart the generator if the previous generator is exhausted.
-    #         self.iter_trainloader = iter(self.trainloader)
-    #         (x, y) = next(self.iter_trainloader)
-
-    #     if type(x) == type([]):
-    #         x = x[0]
-    #     x = x.to(self.device)
-    #     y = y.to(self.device)
-
-    #     return x, y
-
 
     def save_item(self, item, item_name, item_path=None):
         if item_path == None:
@@ -174,6 +201,26 @@ class Client(object):
         if item_path == None:
             item_path = self.save_folder_name
         return torch.load(os.path.join(item_path, "client_" + str(self.id) + "_" + item_name + ".pt"))
+
+
+class FocalLoss(nn.Module):
+    """Focal Loss for multi-class classification."""
+    def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, logits, target):
+        ce = nn.functional.cross_entropy(logits, target, weight=self.alpha, reduction='none')
+        pt = torch.softmax(logits, dim=1).gather(1, target.view(-1, 1)).squeeze(1)
+        focal_factor = (1 - pt).pow(self.gamma)
+        loss = focal_factor * ce
+        if self.reduction == 'mean':
+            return loss.mean()
+        if self.reduction == 'sum':
+            return loss.sum()
+        return loss
 
     # @staticmethod
     # def model_exists():

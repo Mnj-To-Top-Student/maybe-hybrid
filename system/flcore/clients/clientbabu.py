@@ -10,11 +10,6 @@ class clientBABU(Client):
 
         self.fine_tuning_epochs = args.fine_tuning_epochs
 
-        # Only freeze head if not freezing backbone
-        if not getattr(args, 'freeze_backbone', False):
-            for param in self.model.head.parameters():
-                param.requires_grad = False
-
         # Update optimizer to only include trainable parameters
         trainable_params = filter(lambda p: p.requires_grad, self.model.parameters())
         self.optimizer = torch.optim.SGD(trainable_params, lr=self.learning_rate)
@@ -54,6 +49,13 @@ class clientBABU(Client):
 
         self.train_time_cost['num_rounds'] += 1
         self.train_time_cost['total_cost'] += time.time() - start_time
+
+    # Explicitly expose metrics to avoid missing attribute errors
+    def test_metrics(self):
+        return super().test_metrics()
+
+    def train_metrics(self):
+        return super().train_metrics()
 
     def set_parameters(self, base):
         for new_param, old_param in zip(base.parameters(), self.model.base.parameters()):
